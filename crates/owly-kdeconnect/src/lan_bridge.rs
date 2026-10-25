@@ -369,18 +369,22 @@ impl KdeConnectLanBridge {
                         }
                     }
 
-                    // Send a pair request and auto-accept it on `org.kde.kdeconnect` session D-Bus
-                    // so the Apple device is immediately trusted and all KDE Connect plugins load with zero clicks.
-                    let _ = write_half
-                        .write_all(&NetworkPacket::pair_request().to_line())
-                        .await;
-                    let _ = write_half.flush().await;
+                    // Ensure the device is paired in `kdeconnectd` by asking `kdeconnectd` to
+                    // initiate `requestPair` over D-Bus if not already paired, then answering
+                    // its `kdeconnect.pair` request with `pair_accept()`.
                     let dev_id_for_pair = peer.device_id.clone();
                     tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(350)).await;
-                        match auto_accept_kdeconnect_pairing(&dev_id_for_pair).await {
-                            Ok(()) => tracing::info!(device_id = %dev_id_for_pair, "Auto-accepted KDE Connect pairing via D-Bus"),
-                            Err(e) => tracing::debug!(device_id = %dev_id_for_pair, "D-Bus acceptPairing returned: {e}"),
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        match ensure_kdeconnect_paired(&dev_id_for_pair).await {
+                            Ok(already) => tracing::info!(
+                                device_id = %dev_id_for_pair,
+                                already_paired = already,
+                                "Verified KDE Connect pairing state via D-Bus"
+                            ),
+                            Err(e) => tracing::debug!(
+                                device_id = %dev_id_for_pair,
+                                "D-Bus pairing check returned: {e}"
+                            ),
                         }
                     });
 
@@ -443,7 +447,12 @@ impl KdeConnectLanBridge {
 
         match pkt.packet_type.as_str() {
             PACKET_TYPE_PAIR => {
-                if pkt.get_bool("pair") == Some(true) {
+                // Only send `pair_accept` when `kdeconnectd` is requesting a new pair
+                // (Protocol v8 pair requests include `"timestamp"` in `body`). Replying
+                // `pair: true` to a `pair: true` confirmation when already paired causes
+                // `kdeconnectd` to unpair the device!
+                if pkt.get_bool("pair") == Some(true) && pkt.body.contains_key("timestamp") {
+                    tracing::info!(peer = %peer.name, "Accepting incoming pair request from kdeconnectd");
                     return Some(NetworkPacket::pair_accept());
                 }
             }
@@ -627,20 +636,36 @@ pub fn default_kdeconnect_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], KDECONNECT_PORT))
 }
 
-/// Calls `org.kde.kdeconnect.device.acceptPairing` on the user's session D-Bus so
-/// newly discovered Apple devices are immediately trusted by stock `kdeconnectd`
-/// without requiring manual pairing clicks.
-async fn auto_accept_kdeconnect_pairing(device_id: &str) -> zbus::Result<()> {
+/// Checks `org.kde.kdeconnect.device.isPaired` on session D-Bus and, if not yet paired,
+/// calls `requestPairing` on `kdeconnectd` so `kdeconnectd` sends a `kdeconnect.pair`
+/// request that we immediately accept with `pair_accept()`.
+async fn ensure_kdeconnect_paired(device_id: &str) -> zbus::Result<bool> {
     let conn = zbus::Connection::session().await?;
     let path = format!("/modules/kdeconnect/devices/{device_id}");
+    if let Ok(reply) = conn
+        .call_method(
+            Some("org.kde.kdeconnect"),
+            path.as_str(),
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.kde.kdeconnect.device", "isPaired"),
+        )
+        .await
+        && let Ok(val) = reply.body().deserialize::<zbus::zvariant::OwnedValue>()
+        && val.downcast_ref::<bool>() == Ok(true)
+    {
+        return Ok(true);
+    }
+
     conn.call_method(
         Some("org.kde.kdeconnect"),
         path.as_str(),
         Some("org.kde.kdeconnect.device"),
-        "acceptPairing",
+        "requestPairing",
         &(),
     )
     .await?;
-    Ok(())
+    Ok(false)
 }
+
 

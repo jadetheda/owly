@@ -983,6 +983,7 @@ pub async fn advertise_ble(skip: bool) -> Option<BleAdvertGuard> {
 /// Checks BlueZ managed objects for any nearby Apple device broadcasting an AirDrop
 /// BLE advertisement (`Company ID 0x004c` with TLV type `0x05`), which iOS/macOS
 /// transmits whenever the user opens the AirDrop / Share sheet.
+/// Also ensures BlueZ LE scanning (`StartDiscovery`) is active so advertisements are heard.
 pub async fn check_ble_airdrop_wake_trigger() -> bool {
     let Ok(conn) = zbus::Connection::system().await else {
         return false;
@@ -1000,6 +1001,38 @@ pub async fn check_ble_airdrop_wake_trigger() -> bool {
     let Ok(objects) = om.get_managed_objects().await else {
         return false;
     };
+
+    for (path, ifaces) in &objects {
+        if let Some(adapter) = ifaces.get(BLUEZ_ADAPTER) {
+            let discovering = adapter
+                .get("Discovering")
+                .and_then(|v| v.downcast_ref::<bool>().ok())
+                .unwrap_or(false);
+            if !discovering {
+                let mut filter = HashMap::<&str, ZValue>::new();
+                filter.insert("Transport", ZValue::from("le"));
+                filter.insert("DuplicateData", ZValue::from(true));
+                let _ = conn
+                    .call_method(
+                        Some("org.bluez"),
+                        path.as_str(),
+                        Some(BLUEZ_ADAPTER),
+                        "SetDiscoveryFilter",
+                        &(filter,),
+                    )
+                    .await;
+                let _ = conn
+                    .call_method(
+                        Some("org.bluez"),
+                        path.as_str(),
+                        Some(BLUEZ_ADAPTER),
+                        "StartDiscovery",
+                        &(),
+                    )
+                    .await;
+            }
+        }
+    }
 
     for (_path, ifaces) in objects {
         let Some(dev) = ifaces.get("org.bluez.Device1") else {
