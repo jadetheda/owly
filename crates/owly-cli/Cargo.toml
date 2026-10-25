@@ -19,6 +19,7 @@ getrandom = "0.3"
 nix = { version = "0.31", default-features = false, features = ["hostname", "net", "signal", "user"] }
 owly-airdrop = { path = "../owly-airdrop", features = ["mdns"] }
 owly-awdl = { path = "../owly-awdl" }
+owly-kdeconnect = { path = "../owly-kdeconnect" }
 owly-radio = { path = "../owly-radio" }
 owlyd = { path = "../owlyd" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

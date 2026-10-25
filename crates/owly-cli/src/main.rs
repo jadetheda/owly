@@ -57,6 +57,8 @@ enum Command {
     TestCard(test_card::Args),
     /// Record an AWDL session with a phone for tests/captures (root).
     Capture(capture::Args),
+    /// Bridge Owly (AWDL + AirDrop) and Apple BLE endpoints directly into KDE Connect.
+    Kdeconnect(owly_kdeconnect::DaemonArgs),
 }
 
 #[derive(Subcommand)]
@@ -98,6 +100,7 @@ fn main() -> ExitCode {
             Command::Browse(args) => airdrop::browse(args).await,
             Command::TestCard(args) => test_card::run(bus, args).await,
             Command::Capture(args) => capture::run(args).await,
+            Command::Kdeconnect(args) => owly_kdeconnect::run_daemon(bus, args).await,
         }
     });
     match result {
