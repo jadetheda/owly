@@ -309,7 +309,7 @@ impl KdeConnectLanBridge {
                     }
 
                     // Read `kdeconnectd`'s encrypted identity line
-                    let Ok(Some(_kde_identity)) =
+                    let Ok(Ok(Some(_kde_identity))) =
                         tokio::time::timeout(Duration::from_secs(5), reader.next_line()).await
                     else {
                         tokio::time::sleep(Duration::from_secs(5)).await;

@@ -552,7 +552,7 @@ fn prop_string(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String>
 }
 
 fn prop_bool(props: &HashMap<String, OwnedValue>, key: &str) -> Option<bool> {
-    props.get(key)?.downcast_ref::<bool>().copied().ok()
+    props.get(key)?.downcast_ref::<bool>().ok()
 }
 
 #[cfg(test)]

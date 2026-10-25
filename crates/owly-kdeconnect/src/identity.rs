@@ -140,7 +140,11 @@ impl DeviceIdentity {
         params.distinguished_name = dn;
 
         let cert = params.self_signed(&key).map_err(io::Error::other)?;
-        let cert_pem = cert.pem();
+        let b64 = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(cert.der().as_ref())
+        };
+        let cert_pem = format!("-----BEGIN CERTIFICATE-----\n{b64}\n-----END CERTIFICATE-----\n");
         let pkcs8 = key.key.to_pkcs8_der().map_err(io::Error::other)?;
 
         Ok(Self {
