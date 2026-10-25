@@ -273,48 +273,101 @@ impl KdeConnectLanBridge {
         };
         let acceptor = TlsAcceptor::from(server_cfg);
 
+        let mut proto_ver: i64 = 7;
+
         loop {
             match TcpStream::connect(self.kdeconnect_addr).await {
                 Ok(mut tcp) => {
                     let _ = tcp.set_nodelay(true);
-                    // Step 1: Send plaintext pre-TLS connection packet (`DeviceInfo::toConnectionPacket`)
-                    let conn_pkt = NetworkPacket::connection_packet(&peer.device_id, &peer.name);
-                    if tcp.write_all(&conn_pkt.to_line()).await.is_err()
-                        || tcp.flush().await.is_err()
-                    {
+                    tracing::debug!(
+                        peer = %peer.name,
+                        id = %peer.device_id,
+                        addr = %self.kdeconnect_addr,
+                        protocol = proto_ver,
+                        "Connected to kdeconnectd TCP port; sending pre-TLS identity packet"
+                    );
+
+                    // Step 1: Send plaintext pre-TLS identity packet (valid for both v7 and v8)
+                    let conn_pkt = NetworkPacket::connection_packet(
+                        &peer.device_id,
+                        &peer.name,
+                        &peer.device_type,
+                        proto_ver,
+                    );
+                    if let Err(e) = tcp.write_all(&conn_pkt.to_line()).await {
+                        tracing::warn!("Failed writing pre-TLS packet to kdeconnectd: {e}");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
+                    let _ = tcp.flush().await;
 
                     // Step 2: `kdeconnectd` calls `socket->startClientEncryption()`, so we act as TLS Server
-                    let Ok(tls_stream) = acceptor.accept(tcp).await else {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
+                    let tls_stream = match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        acceptor.accept(tcp),
+                    )
+                    .await
+                    {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                protocol = proto_ver,
+                                "TLS handshake with kdeconnectd failed ({e}); toggling protocol v7/v8"
+                            );
+                            proto_ver = if proto_ver == 7 { 8 } else { 7 };
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                protocol = proto_ver,
+                                "Timed out waiting for kdeconnectd to start TLS; toggling protocol v7/v8"
+                            );
+                            proto_ver = if proto_ver == 7 { 8 } else { 7 };
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
                     };
 
                     let (read_half, mut write_half) = tokio::io::split(tls_stream);
                     let mut reader = BufReader::new(read_half).lines();
 
-                    // Step 3: Send our encrypted `kdeconnect.identity` packet
-                    let id_pkt = NetworkPacket::identity_packet(
-                        &peer.device_id,
-                        &peer.name,
-                        &peer.device_type,
-                    );
-                    if write_half.write_all(&id_pkt.to_line()).await.is_err()
-                        || write_half.flush().await.is_err()
-                    {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
+                    // Step 3: If speaking Protocol v8, send encrypted identity packet as well
+                    if proto_ver >= 8 {
+                        let id_pkt = NetworkPacket::identity_packet(
+                            &peer.device_id,
+                            &peer.name,
+                            &peer.device_type,
+                        );
+                        if write_half.write_all(&id_pkt.to_line()).await.is_err()
+                            || write_half.flush().await.is_err()
+                        {
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            continue;
+                        }
                     }
 
-                    // Read `kdeconnectd`'s encrypted identity line
-                    let Ok(Ok(Some(_kde_identity))) =
-                        tokio::time::timeout(Duration::from_secs(5), reader.next_line()).await
-                    else {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    };
+                    // Step 4: Read `kdeconnectd`'s encrypted identity line
+                    match tokio::time::timeout(Duration::from_secs(5), reader.next_line()).await {
+                        Ok(Ok(Some(kde_line))) => {
+                            tracing::info!(
+                                peer = %peer.name,
+                                id = %peer.device_id,
+                                kde_host = %kde_line.trim(),
+                                "Established KDE Connect TLS session with local kdeconnectd"
+                            );
+                        }
+                        other => {
+                            tracing::warn!(
+                                protocol = proto_ver,
+                                ?other,
+                                "kdeconnectd closed TLS stream before sending identity; toggling protocol v7/v8"
+                            );
+                            proto_ver = if proto_ver == 7 { 8 } else { 7 };
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    }
 
                     // Send a pair request and auto-accept it on `org.kde.kdeconnect` session D-Bus
                     // so the Apple device is immediately trusted and all KDE Connect plugins load with zero clicks.
@@ -325,7 +378,10 @@ impl KdeConnectLanBridge {
                     let dev_id_for_pair = peer.device_id.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(350)).await;
-                        let _ = auto_accept_kdeconnect_pairing(&dev_id_for_pair).await;
+                        match auto_accept_kdeconnect_pairing(&dev_id_for_pair).await {
+                            Ok(()) => tracing::info!(device_id = %dev_id_for_pair, "Auto-accepted KDE Connect pairing via D-Bus"),
+                            Err(e) => tracing::debug!(device_id = %dev_id_for_pair, "D-Bus acceptPairing returned: {e}"),
+                        }
                     });
 
                     // Also announce MPRIS player list
@@ -347,8 +403,10 @@ impl KdeConnectLanBridge {
                             }
                             line_res = reader.next_line() => {
                                 let Ok(Some(line)) = line_res else {
+                                    tracing::warn!(peer = %peer.name, "kdeconnectd TLS connection closed; reconnecting");
                                     break;
                                 };
+                                tracing::debug!(peer = %peer.name, packet = %line, "Received packet from kdeconnectd");
                                 let Ok(pkt) = NetworkPacket::from_line(&line) else {
                                     continue;
                                 };
@@ -360,8 +418,11 @@ impl KdeConnectLanBridge {
                         }
                     }
                 }
-                Err(_) => {
-                    // `kdeconnectd` is not running yet; retry quietly
+                Err(e) => {
+                    tracing::warn!(
+                        addr = %self.kdeconnect_addr,
+                        "Could not connect to kdeconnectd TCP listener ({e}); is kdeconnectd running?"
+                    );
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

@@ -181,33 +181,31 @@ impl NetworkPacket {
 
     // --- Packet Builders ---
 
-    /// Plaintext pre-TLS connection packet (`DeviceInfo::toConnectionPacket`).
-    pub fn connection_packet(device_id: &str, device_name: &str) -> Self {
-        Self::new(
-            PACKET_TYPE_IDENTITY,
-            json!({
-                "deviceId": device_id,
-                "deviceName": device_name,
-                "protocolVersion": PROTOCOL_VERSION,
-                "targetDeviceId": "",
-                "targetProtocolVersion": PROTOCOL_VERSION,
-            }),
-        )
-    }
-
-    /// Post-TLS identity packet (`DeviceInfo::toIdentityPacket`).
-    pub fn identity_packet(device_id: &str, device_name: &str, device_type: &str) -> Self {
+    /// Plaintext pre-TLS connection packet (`DeviceInfo::toConnectionPacket` / v7+v8 compatible).
+    /// Note: Must NOT include an empty `targetDeviceId: ""`, as `kdeconnectd` drops packets whose
+    /// `targetDeviceId` is present and does not match the local host's `deviceId`.
+    pub fn connection_packet(
+        device_id: &str,
+        device_name: &str,
+        device_type: &str,
+        protocol_version: i64,
+    ) -> Self {
         Self::new(
             PACKET_TYPE_IDENTITY,
             json!({
                 "deviceId": device_id,
                 "deviceName": device_name,
                 "deviceType": device_type,
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": protocol_version,
                 "incomingCapabilities": OWLY_INCOMING_CAPABILITIES,
                 "outgoingCapabilities": OWLY_OUTGOING_CAPABILITIES,
             }),
         )
+    }
+
+    /// Post-TLS identity packet (`DeviceInfo::toIdentityPacket`).
+    pub fn identity_packet(device_id: &str, device_name: &str, device_type: &str) -> Self {
+        Self::connection_packet(device_id, device_name, device_type, PROTOCOL_VERSION)
     }
 
     pub fn pair_request() -> Self {
