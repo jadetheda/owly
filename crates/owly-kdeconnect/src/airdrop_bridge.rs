@@ -247,6 +247,36 @@ impl OwlyAirdropBridge {
         let _ = self.events_tx.send(BridgeEvent::PeerUpdated(peer));
     }
 
+    /// Checks `owlyd`'s `Probe()` JSON to see whether the Wi-Fi card runs in `shared` mode
+    /// (keeps normal Wi-Fi connected while `awdl0` is up) or `exclusive` mode (temporarily
+    /// borrows the Wi-Fi card for the duration of the AirDrop window).
+    pub async fn is_shared_radio_mode(&self) -> bool {
+        let Ok(conn) = api::connect(self.config.bus_address.as_deref()).await else {
+            return false;
+        };
+        let Ok(radio) = api::radio(&conn).await else {
+            return false;
+        };
+        let Ok(probe_json) = radio.probe().await else {
+            return false;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&probe_json) else {
+            return false;
+        };
+        val.get("mode").and_then(|m| m.as_str()) == Some("shared")
+    }
+
+    /// Releases any `owlyd` lease currently held by this bridge so NetworkManager immediately
+    /// reconnects normal Wi-Fi on `exclusive`-mode cards.
+    pub async fn release_held_lease(&self) {
+        let taken = self.held_lease.lock().await.take();
+        if let Some((conn, lease_id, _)) = taken
+            && let Ok(radio) = api::radio(&conn).await
+        {
+            let _ = radio.release(lease_id).await;
+        }
+    }
+
     /// Ensures the AWDL interface (`awdl0`) is available, acquiring an `owlyd` lease
     /// if `auto_acquire_radio` is enabled and the interface is not already up.
     pub async fn ensure_interface(&self, duration_secs: u32) -> io::Result<(AwdlInterface, Option<LinkInfo>)> {
@@ -310,13 +340,14 @@ impl OwlyAirdropBridge {
             .collect()
     }
 
-    /// Starts the persistent `owly-airdrop` `Receiver` and mDNS responder when the AWDL
-    /// interface is available.
-    pub async fn start_receiver_loop(self: Arc<Self>) -> io::Result<()> {
+    /// Starts the `owly-airdrop` `Receiver` and mDNS responder for `lease_duration_secs`
+    /// (`0` = continuous on `shared`-mode cards, or e.g. `90` seconds when woken by an iPhone's
+    /// BLE `0x004c` type `0x05` AirDrop advertisement on `exclusive`-mode cards).
+    pub async fn start_receiver_window(self: Arc<Self>, lease_duration_secs: u32) -> io::Result<()> {
         std::fs::create_dir_all(&self.config.receive_dir)?;
         std::fs::create_dir_all(&self.config.state_dir)?;
 
-        let (iface, link_info) = self.ensure_interface(0).await?;
+        let (iface, link_info) = self.ensure_interface(lease_duration_secs).await?;
         let identity = AirdropIdentity::load_or_generate(&self.config.state_dir)?;
 
         let mut rx_config = ReceiverConfig::new(self.config.computer_name.clone());
@@ -688,7 +719,14 @@ impl OwlyAirdropBridge {
         let addr = target
             .addr
             .ok_or_else(|| io::Error::other("resolved peer has no IPv6 socket address"))?;
-        sender.send(addr, &payload, target.flags, Some(tx)).await
+        let res = sender.send(addr, &payload, target.flags, Some(tx)).await;
+
+        // If the Wi-Fi card is in `exclusive` mode, release the lease right after the transfer
+        // finishes so NetworkManager immediately reconnects normal Wi-Fi.
+        if !self.is_shared_radio_mode().await {
+            self.release_held_lease().await;
+        }
+        res
     }
 
     async fn resolve_target(
@@ -941,3 +979,43 @@ pub async fn advertise_ble(skip: bool) -> Option<BleAdvertGuard> {
         path,
     })
 }
+
+/// Checks BlueZ managed objects for any nearby Apple device broadcasting an AirDrop
+/// BLE advertisement (`Company ID 0x004c` with TLV type `0x05`), which iOS/macOS
+/// transmits whenever the user opens the AirDrop / Share sheet.
+pub async fn check_ble_airdrop_wake_trigger() -> bool {
+    let Ok(conn) = zbus::Connection::system().await else {
+        return false;
+    };
+    let Ok(om) = zbus::fdo::ObjectManagerProxy::builder(&conn)
+        .destination("org.bluez")
+        .and_then(|b| b.path("/"))
+        .map(|b| b.build())
+    else {
+        return false;
+    };
+    let Ok(om) = om.await else {
+        return false;
+    };
+    let Ok(objects) = om.get_managed_objects().await else {
+        return false;
+    };
+
+    for (_path, ifaces) in objects {
+        let Some(dev) = ifaces.get("org.bluez.Device1") else {
+            continue;
+        };
+        let Some(mfg) = dev.get("ManufacturerData") else {
+            continue;
+        };
+        if let Ok(map) = <HashMap<u16, OwnedValue>>::try_from(mfg.clone())
+            && let Some(apple_bytes_val) = map.get(&APPLE_COMPANY_ID)
+            && let Ok(bytes) = <Vec<u8>>::try_from(apple_bytes_val.clone())
+            && bytes.first() == Some(&0x05)
+        {
+            return true;
+        }
+    }
+    false
+}
+

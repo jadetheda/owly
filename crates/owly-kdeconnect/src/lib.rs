@@ -130,10 +130,26 @@ pub async fn run_daemon(bus: Option<&str>, args: DaemonArgs) -> Result<ExitCode,
     let rx_bridge = bridge.clone();
     tokio::spawn(async move {
         loop {
-            if let Err(e) = rx_bridge.clone().start_receiver_loop().await {
-                tracing::debug!("Waiting for AWDL interface ({e}); retrying in 5s...");
+            if rx_bridge.is_shared_radio_mode().await || !rx_bridge.config().auto_acquire_radio {
+                // In `shared` radio mode (or when managing an external awdl0 lease), normal Wi-Fi
+                // stays connected simultaneously, so we keep the AirDrop receiver open 24/7.
+                if let Err(e) = rx_bridge.clone().start_receiver_window(0).await {
+                    tracing::debug!("Waiting for AWDL interface ({e}); retrying in 5s...");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            } else {
+                // In `exclusive` radio mode, keep normal Wi-Fi connected while idle and automatically
+                // open a 90-second AirDrop receiver window whenever an iPhone/Mac broadcasts a BLE
+                // AirDrop wake advertisement (`0x004c` type `0x05`) or if `awdl0` is already up.
+                if airdrop_bridge::AwdlInterface::lookup(&rx_bridge.config().iface).is_ok()
+                    || airdrop_bridge::check_ble_airdrop_wake_trigger().await
+                {
+                    tracing::info!("Detected AirDrop activity; opening 90s AWDL receiver window");
+                    let _ = rx_bridge.clone().start_receiver_window(90).await;
+                    rx_bridge.release_held_lease().await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 
