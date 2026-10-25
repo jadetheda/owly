@@ -205,7 +205,12 @@ impl NetworkPacket {
 
     /// Post-TLS identity packet (`DeviceInfo::toIdentityPacket`).
     pub fn identity_packet(device_id: &str, device_name: &str, device_type: &str) -> Self {
-        Self::connection_packet(device_id, device_name, device_type, PROTOCOL_VERSION)
+        Self::connection_packet(
+            device_id,
+            device_name,
+            device_type,
+            i64::from(PROTOCOL_VERSION),
+        )
     }
 
     pub fn pair_request() -> Self {
