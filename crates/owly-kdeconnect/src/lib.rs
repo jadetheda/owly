@@ -145,7 +145,10 @@ pub async fn run_daemon(bus: Option<&str>, args: DaemonArgs) -> Result<ExitCode,
                     || airdrop_bridge::check_ble_airdrop_wake_trigger().await
                 {
                     tracing::info!("Detected AirDrop activity; opening 90s AWDL receiver window");
-                    let _ = rx_bridge.clone().start_receiver_window(90).await;
+                    if let Err(e) = rx_bridge.clone().start_receiver_window(90).await {
+                        tracing::warn!("AWDL receiver window failed to start: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
                     rx_bridge.release_held_lease().await;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;

@@ -469,11 +469,25 @@ impl KdeConnectLanBridge {
                     let query = target_query.clone();
 
                     tokio::spawn(async move {
-                        if let Ok(path) =
-                            download_kdeconnect_payload(host_ip, port, &filename, &identity_clone)
-                                .await
+                        tracing::info!(filename = %filename, port, "Downloading shared file payload from kdeconnectd");
+                        match download_kdeconnect_payload(
+                            host_ip,
+                            port,
+                            &filename,
+                            &identity_clone,
+                        )
+                        .await
                         {
-                            let _ = airdrop.send_files(query.as_deref(), vec![path], 30).await;
+                            Ok(path) => {
+                                tracing::info!(path = %path.display(), "Downloaded payload from kdeconnectd; starting AirDrop send");
+                                match airdrop.send_files(query.as_deref(), vec![path], 45).await {
+                                    Ok(outcome) => tracing::info!(?outcome, "AirDrop file transfer finished"),
+                                    Err(e) => tracing::warn!("AirDrop file transfer failed: {e}"),
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(filename = %filename, port, "Failed downloading payload from kdeconnectd: {e}");
+                            }
                         }
                     });
                 } else if let Some(url) = pkt.get_str("url") {
@@ -481,14 +495,20 @@ impl KdeConnectLanBridge {
                     let airdrop = self.airdrop.clone();
                     let query = target_query.clone();
                     tokio::spawn(async move {
-                        let _ = airdrop.send_urls(query.as_deref(), vec![url_str], 30).await;
+                        tracing::info!(url = %url_str, "Starting AirDrop URL transfer");
+                        if let Err(e) = airdrop.send_urls(query.as_deref(), vec![url_str], 45).await {
+                            tracing::warn!("AirDrop URL transfer failed: {e}");
+                        }
                     });
                 } else if let Some(text) = pkt.get_str("text") {
                     let text_str = text.to_string();
                     let airdrop = self.airdrop.clone();
                     let query = target_query.clone();
                     tokio::spawn(async move {
-                        let _ = airdrop.send_text(query.as_deref(), &text_str, 30).await;
+                        tracing::info!("Starting AirDrop text transfer");
+                        if let Err(e) = airdrop.send_text(query.as_deref(), &text_str, 45).await {
+                            tracing::warn!("AirDrop text transfer failed: {e}");
+                        }
                     });
                 }
             }
