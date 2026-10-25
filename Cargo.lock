@@ -764,6 +764,7 @@ dependencies = [
  "nix",
  "owly-airdrop",
  "owly-awdl",
+ "owly-kdeconnect",
  "owly-radio",
  "owlyd",
  "rustls",
@@ -771,6 +772,33 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
+name = "owly-kdeconnect"
+version = "0.4.1"
+dependencies = [
+ "base64",
+ "clap",
+ "futures-util",
+ "getrandom 0.3.4",
+ "nix",
+ "owly-airdrop",
+ "owly-awdl",
+ "owly-radio",
+ "owlyd",
+ "p256",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "zbus",
