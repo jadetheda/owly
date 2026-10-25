@@ -316,11 +316,17 @@ impl KdeConnectLanBridge {
                         continue;
                     };
 
-                    // Send a pair request so if the device isn't trusted yet, KDE Connect shows the Pair button
+                    // Send a pair request and auto-accept it on `org.kde.kdeconnect` session D-Bus
+                    // so the Apple device is immediately trusted and all KDE Connect plugins load with zero clicks.
                     let _ = write_half
                         .write_all(&NetworkPacket::pair_request().to_line())
                         .await;
                     let _ = write_half.flush().await;
+                    let dev_id_for_pair = peer.device_id.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(350)).await;
+                        let _ = auto_accept_kdeconnect_pairing(&dev_id_for_pair).await;
+                    });
 
                     // Also announce MPRIS player list
                     let _ = write_half
@@ -564,3 +570,21 @@ async fn download_kdeconnect_payload(
 pub fn default_kdeconnect_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], KDECONNECT_PORT))
 }
+
+/// Calls `org.kde.kdeconnect.device.acceptPairing` on the user's session D-Bus so
+/// newly discovered Apple devices are immediately trusted by stock `kdeconnectd`
+/// without requiring manual pairing clicks.
+async fn auto_accept_kdeconnect_pairing(device_id: &str) -> zbus::Result<()> {
+    let conn = zbus::Connection::session().await?;
+    let path = format!("/modules/kdeconnect/devices/{device_id}");
+    conn.call_method(
+        Some("org.kde.kdeconnect"),
+        path.as_str(),
+        Some("org.kde.kdeconnect.device"),
+        "acceptPairing",
+        &(),
+    )
+    .await?;
+    Ok(())
+}
+

@@ -8,7 +8,7 @@ owly := "cargo run --quiet --locked -p owly-cli --"
 
 # What `just install` installs, built together as the packages build them:
 # owlyd built alone gets other features, so a different binary
-release := "cargo build --release --locked -p owlyd -p owly-cli -p omdrop-owl"
+release := "cargo build --release --locked -p owlyd -p owly-cli -p owly-kdeconnect -p omdrop-owl"
 
 [private]
 default:

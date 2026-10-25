@@ -63,13 +63,13 @@ prepare() {
 build() {
   cd "$(_tree)"
   _cargo_env
-  cargo build --frozen --release -p owlyd -p owly-cli
+  cargo build --frozen --release -p owlyd -p owly-cli -p owly-kdeconnect
 }
 
 check() {
   cd "$(_tree)"
   _cargo_env
-  cargo test --frozen --release -p owlyd -p owly-cli
+  cargo test --frozen --release -p owlyd -p owly-cli -p owly-kdeconnect
 }
 
 package() {

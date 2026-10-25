@@ -1,0 +1,13 @@
+[Unit]
+Description=Owly (AWDL / AirDrop / Apple BLE) Endpoint Bridge for KDE Connect
+Documentation=https://github.com/jadetheda/owly
+After=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/owly kdeconnect daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

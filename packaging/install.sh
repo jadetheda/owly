@@ -129,11 +129,27 @@ helper_policy() {
     || { echo "packaging/install.sh: io.github.t4t5.omdrop-owl.policy has no /usr/lib/omdrop/omdrop-discoverable to rewrite" >&2; exit 1; }
 }
 
+# owly-kdeconnectd's user unit, with ExecStart where BINDIR put owly.
+user_unit() {
+  if [ -n "$LIST" ]; then
+    echo "$1"
+    return
+  fi
+  install -d "$DESTDIR$(dirname "$1")"
+  sed "s|^ExecStart=/usr/bin/owly kdeconnect daemon$|ExecStart=$BINDIR/owly kdeconnect daemon|" \
+    "$ROOT/packaging/owly-kdeconnectd.service" > "$DESTDIR$1"
+  chmod 644 "$DESTDIR$1"
+}
+
 case "$PKG" in
   owly)
     put 755 "$BUILT/owlyd" "$LIBDIR/owly/owlyd"
     put 755 "$BUILT/owly" "$BINDIR/owly"
+    if [ -f "$BUILT/owly-kdeconnectd" ]; then
+      put 755 "$BUILT/owly-kdeconnectd" "$BINDIR/owly-kdeconnectd"
+    fi
     unit "$LIBDIR/systemd/system/owlyd.service"
+    user_unit "$LIBDIR/systemd/user/owly-kdeconnectd.service"
     put 644 "$ROOT/packaging/io.github.t4t5.Owly.conf" "$DATADIR/dbus-1/system.d/io.github.t4t5.Owly.conf"
     put 644 "$ROOT/packaging/io.github.t4t5.Owly.service" "$DATADIR/dbus-1/system-services/io.github.t4t5.Owly.service"
     put 644 "$ROOT/packaging/io.github.t4t5.Owly.policy" "$DATADIR/polkit-1/actions/io.github.t4t5.Owly.policy"
