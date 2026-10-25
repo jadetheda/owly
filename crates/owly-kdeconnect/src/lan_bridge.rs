@@ -273,7 +273,7 @@ impl KdeConnectLanBridge {
         };
         let acceptor = TlsAcceptor::from(server_cfg);
 
-        let mut proto_ver: i64 = 7;
+        let mut proto_ver: i64 = 8;
 
         loop {
             match TcpStream::connect(self.kdeconnect_addr).await {
@@ -484,16 +484,11 @@ impl KdeConnectLanBridge {
                 }
             }
             PACKET_TYPE_CLIPBOARD | PACKET_TYPE_CLIPBOARD_CONNECT => {
-                if let Some(content) = pkt.get_str("content")
-                    && !content.trim().is_empty()
-                {
-                    let content_str = content.to_string();
-                    let airdrop = self.airdrop.clone();
-                    let query = target_query.clone();
-                    tokio::spawn(async move {
-                        let _ = airdrop.send_text(query.as_deref(), &content_str, 30).await;
-                    });
-                }
+                // Ignore automatic background clipboard sync (`clipboard.connect` on pair and
+                // auto-sync on Ctrl+C) so copying text or pairing never interrupts Wi-Fi or
+                // spams the iPhone with AirDrop prompts. Explicit text/link/file sharing in
+                // KDE Connect uses `kdeconnect.share.request` above.
+                tracing::debug!("Ignoring background clipboard sync packet (use Share to send via AirDrop)");
             }
             PACKET_TYPE_PING | PACKET_TYPE_FINDMYPHONE_REQUEST => {
                 let msg = pkt.get_str("message").map(String::from);
