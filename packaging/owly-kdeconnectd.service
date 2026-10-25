@@ -5,7 +5,7 @@ After=dbus.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/owly kdeconnect daemon
+ExecStart=/usr/bin/owly kdeconnect
 Restart=on-failure
 RestartSec=3
 

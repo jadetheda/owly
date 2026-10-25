@@ -136,7 +136,7 @@ user_unit() {
     return
   fi
   install -d "$DESTDIR$(dirname "$1")"
-  sed "s|^ExecStart=/usr/bin/owly kdeconnect daemon$|ExecStart=$BINDIR/owly kdeconnect daemon|" \
+  sed "s|^ExecStart=/usr/bin/owly kdeconnect$|ExecStart=$BINDIR/owly kdeconnect|" \
     "$ROOT/packaging/owly-kdeconnectd.service" > "$DESTDIR$1"
   chmod 644 "$DESTDIR$1"
 }
