@@ -26,8 +26,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::airdrop_bridge::{ApplePeer, BridgeEvent, OwlyAirdropBridge};
 use crate::apple_ble::{
-    empty_sms_messages_packet, execute_bluez_media_action, pull_obex_contacts,
-    read_bluez_media_status, scan_bluez_apple_devices, send_ancs_action,
+    empty_sms_messages_packet, execute_bluez_media_action, poll_ancs_notifications,
+    pull_obex_contacts, read_bluez_media_status, scan_bluez_apple_devices, send_ancs_action,
 };
 use crate::identity::DeviceIdentity;
 use crate::packet::{
@@ -79,9 +79,10 @@ impl KdeConnectLanBridge {
         let mut bridge_rx = self.airdrop.subscribe();
         let bridge_self = self.clone();
 
-        // Spawn BlueZ battery/device poller
+        // Spawn BlueZ battery / MPRIS / ANCS poller
         let ble_self = self.clone();
         tokio::spawn(async move {
+            let mut seen_ancs = std::collections::HashSet::new();
             loop {
                 if let Ok(devs) = scan_bluez_apple_devices().await {
                     for dev in devs {
@@ -109,9 +110,17 @@ impl KdeConnectLanBridge {
                                 )
                                 .await;
                         }
+                        if let Some(mp_path) = &dev.media_player_path
+                            && let Ok(mpris_pkt) = read_bluez_media_status(mp_path).await
+                        {
+                            ble_self.send_to_kdeconnect(&dev.device_id, mpris_pkt).await;
+                        }
+                        for ancs_pkt in poll_ancs_notifications(&dev, &mut seen_ancs).await {
+                            ble_self.send_to_kdeconnect(&dev.device_id, ancs_pkt).await;
+                        }
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(15)).await;
+                tokio::time::sleep(Duration::from_secs(4)).await;
             }
         });
 

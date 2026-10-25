@@ -245,7 +245,9 @@ pub struct BluezAppleDevice {
     pub address: String,
     pub connected: bool,
     pub battery_percentage: Option<i32>,
+    pub ancs_notification_source_path: Option<String>,
     pub ancs_control_point_path: Option<String>,
+    pub ancs_data_source_path: Option<String>,
     pub media_player_path: Option<String>,
 }
 
@@ -289,7 +291,9 @@ pub async fn scan_bluez_apple_devices() -> io::Result<Vec<BluezAppleDevice>> {
             .map(i32::from);
 
         let prefix = format!("{}/", path.as_str());
+        let mut ancs_ns = None;
         let mut ancs_cp = None;
+        let mut ancs_ds = None;
         let mut media_player = None;
 
         for (sub_path, sub_ifaces) in &objects {
@@ -301,9 +305,14 @@ pub async fn scan_bluez_apple_devices() -> io::Result<Vec<BluezAppleDevice>> {
             }
             if let Some(ch) = sub_ifaces.get("org.bluez.GattCharacteristic1")
                 && let Some(uuid) = prop_string(ch, "UUID")
-                && uuid.eq_ignore_ascii_case(ANCS_CONTROL_POINT_UUID)
             {
-                ancs_cp = Some(sub_path.as_str().to_string());
+                if uuid.eq_ignore_ascii_case(ANCS_NOTIFICATION_SOURCE_UUID) {
+                    ancs_ns = Some(sub_path.as_str().to_string());
+                } else if uuid.eq_ignore_ascii_case(ANCS_CONTROL_POINT_UUID) {
+                    ancs_cp = Some(sub_path.as_str().to_string());
+                } else if uuid.eq_ignore_ascii_case(ANCS_DATA_SOURCE_UUID) {
+                    ancs_ds = Some(sub_path.as_str().to_string());
+                }
             }
         }
 
@@ -314,12 +323,117 @@ pub async fn scan_bluez_apple_devices() -> io::Result<Vec<BluezAppleDevice>> {
             address,
             connected,
             battery_percentage,
+            ancs_notification_source_path: ancs_ns,
             ancs_control_point_path: ancs_cp,
+            ancs_data_source_path: ancs_ds,
             media_player_path: media_player,
         });
     }
 
     Ok(devices)
+}
+
+/// Ensures `StartNotify` is enabled on the iPhone's ANCS Notification Source & Data Source
+/// characteristics and converts any newly arrived ANCS notification into KDE Connect packets.
+pub async fn poll_ancs_notifications(
+    dev: &BluezAppleDevice,
+    seen_uids: &mut std::collections::HashSet<u32>,
+) -> Vec<NetworkPacket> {
+    let (Some(ns_path), Some(cp_path), Some(ds_path)) = (
+        dev.ancs_notification_source_path.as_deref(),
+        dev.ancs_control_point_path.as_deref(),
+        dev.ancs_data_source_path.as_deref(),
+    ) else {
+        return Vec::new();
+    };
+
+    let Ok(conn) = zbus::Connection::system().await else {
+        return Vec::new();
+    };
+
+    for path in [ds_path, ns_path] {
+        let _ = conn
+            .call_method(
+                Some("org.bluez"),
+                path,
+                Some("org.bluez.GattCharacteristic1"),
+                "StartNotify",
+                &(),
+            )
+            .await;
+    }
+
+    let Ok(ns_reply) = conn
+        .call_method(
+            Some("org.bluez"),
+            ns_path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.bluez.GattCharacteristic1", "Value"),
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let Ok(ns_val) = ns_reply.body().deserialize::<OwnedValue>() else {
+        return Vec::new();
+    };
+    let Ok(ns_bytes) = <Vec<u8>>::try_from(ns_val) else {
+        return Vec::new();
+    };
+    let Some(ev) = AncsNotificationEvent::parse(&ns_bytes) else {
+        return Vec::new();
+    };
+    if ev.event_id == ANCS_EVENT_REMOVED {
+        seen_uids.remove(&ev.notification_uid);
+        return vec![NetworkPacket::notification_cancel(&format!(
+            "ancs-{}",
+            ev.notification_uid
+        ))];
+    }
+    if !seen_uids.insert(ev.notification_uid) {
+        return Vec::new();
+    }
+
+    let req = ev.build_attribute_request();
+    let options = HashMap::<&str, ZValue>::new();
+    if conn
+        .call_method(
+            Some("org.bluez"),
+            cp_path,
+            Some("org.bluez.GattCharacteristic1"),
+            "WriteValue",
+            &(req, options),
+        )
+        .await
+        .is_err()
+    {
+        return Vec::new();
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let Ok(ds_reply) = conn
+        .call_method(
+            Some("org.bluez"),
+            ds_path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.bluez.GattCharacteristic1", "Value"),
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let Ok(ds_val) = ds_reply.body().deserialize::<OwnedValue>() else {
+        return Vec::new();
+    };
+    let Ok(ds_bytes) = <Vec<u8>>::try_from(ds_val) else {
+        return Vec::new();
+    };
+    let Some(attrs) = AncsParsedAttributes::parse(&ds_bytes) else {
+        return Vec::new();
+    };
+    attrs.to_kdeconnect_packets(ev.category_id)
 }
 
 /// Sends an ANCS Positive or Negative action (`PerformNotificationAction`) to BlueZ's
