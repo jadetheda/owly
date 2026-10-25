@@ -983,11 +983,21 @@ pub async fn advertise_ble(skip: bool) -> Option<BleAdvertGuard> {
 /// Checks BlueZ managed objects for any nearby Apple device broadcasting an AirDrop
 /// BLE advertisement (`Company ID 0x004c` with TLV type `0x05`), which iOS/macOS
 /// transmits whenever the user opens the AirDrop / Share sheet.
-/// Also ensures BlueZ LE scanning (`StartDiscovery`) is active so advertisements are heard.
+/// Keeps a persistent D-Bus connection alive so BlueZ's `StartDiscovery` LE session
+/// is not canceled when the function returns.
 pub async fn check_ble_airdrop_wake_trigger() -> bool {
-    let Ok(conn) = zbus::Connection::system().await else {
+    static BLE_SCAN_CONN: std::sync::OnceLock<tokio::sync::Mutex<Option<zbus::Connection>>> =
+        std::sync::OnceLock::new();
+    let lock = BLE_SCAN_CONN.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut guard = lock.lock().await;
+    if guard.is_none() {
+        *guard = zbus::Connection::system().await.ok();
+    }
+    let Some(conn) = guard.as_ref().cloned() else {
         return false;
     };
+    drop(guard);
+
     let Ok(om) = zbus::fdo::ObjectManagerProxy::builder(&conn)
         .destination("org.bluez")
         .and_then(|b| b.path("/"))
@@ -1034,7 +1044,7 @@ pub async fn check_ble_airdrop_wake_trigger() -> bool {
         }
     }
 
-    for (_path, ifaces) in objects {
+    for (dev_path, ifaces) in objects {
         let Some(dev) = ifaces.get("org.bluez.Device1") else {
             continue;
         };
@@ -1046,9 +1056,28 @@ pub async fn check_ble_airdrop_wake_trigger() -> bool {
             && let Ok(bytes) = <Vec<u8>>::try_from(apple_bytes_val.clone())
             && bytes.first() == Some(&0x05)
         {
+            let paired = dev
+                .get("Paired")
+                .and_then(|v| v.downcast_ref::<bool>().ok())
+                .unwrap_or(false);
+            if !paired
+                && let Some(adapter_val) = dev.get("Adapter")
+                && let Ok(adapter_path) = adapter_val.downcast_ref::<ObjectPath>()
+            {
+                let _ = conn
+                    .call_method(
+                        Some("org.bluez"),
+                        adapter_path.as_str(),
+                        Some(BLUEZ_ADAPTER),
+                        "RemoveDevice",
+                        &(&dev_path,),
+                    )
+                    .await;
+            }
             return true;
         }
     }
     false
 }
+
 
